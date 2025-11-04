@@ -5,9 +5,12 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
-md5 = "0.8.0"
+chrono = { version = "0.4.42", features = ["serde"] }
+hex = "0.4.3"
+md-5 = "0.10.6"
 quick-xml = { version = "0.38.3", features = ["serialize", "tokio"] }
 reqwest = { version = "0.12.24", features = ["json", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_norway = "0.9.42"
+sha2 = "0.10.9"
 tokio = { version = "1.48.0", features = ["full"] }
