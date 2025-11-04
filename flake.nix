@@ -24,17 +24,20 @@
 
       # Development environments
       devShells = forEachSupportedSystem ({ pkgs }: {
-        default = pkgs.mkShell {
+        default = pkgs.mkShell rec {
           # Pinned packages available in the environment
           packages = with pkgs; [
             wget
             nixpkgs-fmt
             unar
-            cargo
-            rustc
-          ];
+            rustup
+            pkg-config
+            openssl
+          ]; 
 
-          shellHook = "cargo check";
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath packages;
+
+          shellHook = "cargo check; rustup default stable;";
         };
       });
     };
