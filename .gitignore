@@ -4,3 +4,4 @@ flake.lock
 # Added by cargo
 
 /target
+existing

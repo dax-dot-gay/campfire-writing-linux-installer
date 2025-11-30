@@ -1,10 +1,14 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::anyhow;
 use chrono::Utc;
+use clap::{Parser, ValueEnum};
 use hex::ToHex;
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
+use std::process::Command;
+use tempdir::TempDir;
+use tokio::fs;
 
 const RELEASES_URL: &'static str = "https://storage.googleapis.com/blaze-desktop-releases";
 const LATEST_FILE: &'static str = "latest.yml";
@@ -19,7 +23,7 @@ pub struct Contents {
 
     #[serde(rename = "ETag")]
     pub hash: String,
-    pub size: u64
+    pub size: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -29,7 +33,7 @@ pub struct ListBucket {
     pub prefix: String,
     pub marker: String,
     pub is_truncated: bool,
-    pub contents: Vec<Contents>
+    pub contents: Vec<Contents>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -38,7 +42,7 @@ pub struct LatestFile {
     pub url: String,
     #[serde(rename = "sha512")]
     pub hash: String,
-    pub size: u64
+    pub size: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -51,25 +55,71 @@ pub struct Latest {
 
     #[serde(rename = "sha512")]
     pub hash: String,
-    pub release_date: chrono::DateTime<Utc>
+    pub release_date: chrono::DateTime<Utc>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum AppArch {
+    X86,
+    Arm,
+}
+
+impl AppArch {
+    pub fn fname(&self) -> String {
+        match self {
+            AppArch::X86 => "app-64.7z",
+            AppArch::Arm => "app-arm64.7z",
+        }
+        .to_string()
+    }
+
+    pub fn dname(&self) -> String {
+        match self {
+            AppArch::X86 => "app-64",
+            AppArch::Arm => "app-arm64",
+        }
+        .to_string()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Parser)]
+#[command(version, about)]
+pub struct Args {
+    /// Point at an setup.exe
+    #[arg(long)]
+    pub existing: Option<String>,
+
+    /// Application architecture to extract
+    #[arg(long, short, value_enum, default_value_t=AppArch::X86)]
+    pub architecture: AppArch,
 }
 
 pub async fn get_manifest() -> anyhow::Result<HashMap<String, Contents>> {
     let response = reqwest::get(RELEASES_URL).await?.error_for_status()?;
     let response_text = response.text().await?;
     let bucket = quick_xml::de::from_str::<ListBucket>(&response_text)?;
-    let contents: HashMap<String, Contents> = bucket.contents.clone().into_iter().map(|v| (v.key.clone(), v)).collect();
+    let contents: HashMap<String, Contents> = bucket
+        .contents
+        .clone()
+        .into_iter()
+        .map(|v| (v.key.clone(), v))
+        .collect();
     Ok(contents)
 }
 
 pub async fn parse_latest(latest: Contents) -> anyhow::Result<Latest> {
-    let response = reqwest::get(format!("{}/{}", RELEASES_URL, LATEST_FILE)).await?.error_for_status()?;
+    let response = reqwest::get(format!("{}/{}", RELEASES_URL, LATEST_FILE))
+        .await?
+        .error_for_status()?;
     let latest_bytes = response.bytes().await?;
     let digest = Md5::digest(latest_bytes.clone()).to_vec();
     let to_verify = hex::decode(latest.hash.trim_matches('"'))?;
-    
+
     if to_verify != digest {
-        return Err(anyhow!("Downloaded latest.yml failed to verify! Aborting..."));
+        return Err(anyhow!(
+            "Downloaded latest.yml failed to verify! Aborting..."
+        ));
     }
 
     let latest = serde_norway::from_slice::<Latest>(&latest_bytes)?;
@@ -77,16 +127,130 @@ pub async fn parse_latest(latest: Contents) -> anyhow::Result<Latest> {
     Ok(latest)
 }
 
+pub async fn download_verify_latest(
+    latest: Latest,
+    contents: HashMap<String, Contents>,
+) -> anyhow::Result<TempDir> {
+    let latest_file = latest
+        .files
+        .get(0)
+        .expect("Expected at least 1 listed file for the latest version!")
+        .clone();
+    let fetch_response = reqwest::get(format!("{}/{}", RELEASES_URL, latest_file.url))
+        .await?
+        .error_for_status()?;
+    let downloaded_bytes = fetch_response.bytes().await?;
+
+    println!("Downloaded, waiting to verify...");
+
+    let digest = Md5::digest(downloaded_bytes.clone()).to_vec();
+    let to_verify = hex::decode(
+        contents
+            .get(&latest_file.url)
+            .expect("Should be a match in content list!")
+            .clone()
+            .hash
+            .trim_matches('"'),
+    )?;
+    if to_verify != digest {
+        return Err(anyhow!(
+            "Downloaded setup exe failed to verify! Aborting..."
+        ));
+    }
+
+    let workdir = TempDir::new_in(".", "camp-li-")?;
+    fs::write(workdir.path().join("setup.exe"), downloaded_bytes).await?;
+
+    Ok(workdir)
+}
+
+pub fn extract_files(directory: &TempDir, args: Args) -> anyhow::Result<String> {
+    let cmd = Command::new("unar")
+        .args([
+            "-o",
+            directory.path().to_str().unwrap(),
+            "-d",
+            directory.path().join("setup.exe").to_str().unwrap(),
+        ])
+        .status()?;
+    if cmd.success() {
+        let mut results: Vec<String> = rust_search::SearchBuilder::default()
+            .location(directory.path().join("setup"))
+            .search_input(args.architecture.fname())
+            .limit(1)
+            .strict()
+            .depth(3)
+            .build()
+            .collect();
+        if let Some(found) = results.pop() {
+            let status = Command::new("unar").args([
+                "-o",
+                directory.path().to_str().unwrap(),
+                "-d",
+                found.as_str(),
+            ]).status()?;
+            if status.success() {
+                let mut results: Vec<String> = rust_search::SearchBuilder::default()
+                    .location(directory.path().join(args.architecture.dname()))
+                    .search_input("app.asar")
+                    .limit(1)
+                    .strict()
+                    .depth(3)
+                    .build()
+                    .collect();
+
+                if let Some(asar) = results.pop() {
+                    Ok(asar)
+                } else {
+                    Err(anyhow!(
+                        "Failed to find ASAR!"
+                    ))
+                }
+            } else {
+                Err(anyhow!("Internal extraction failed with code: {status}"))
+            }
+        } else {
+            Err(anyhow!(
+                "Failed to find internal archive: {}",
+                args.architecture.fname()
+            ))
+        }
+    } else {
+        Err(anyhow!("Initial extraction failed with code: {cmd}"))
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("Downloading release manifest...");
-    let contents = get_manifest().await?;
+    let args = Args::parse();
 
-    println!("Retrieved manifest, parsing and verifying latest version...");
-    let latest = parse_latest(contents.get(LATEST_FILE).ok_or(anyhow!("File <latest.yml> not found in manifest."))?.clone()).await?;
+    let workdir = if let Some(existing) = args.existing.clone() {
+        println!("Skipping download, file exists...");
+        let workdir = TempDir::new_in(".", "camp-li-")?;
+        std::fs::copy(existing, workdir.path().join("setup.exe"))?;
+        workdir
+    } else {
+        println!("Downloading release manifest...");
+        let contents = get_manifest().await?;
 
-    println!("{latest:?}");
+        println!("Retrieved manifest, parsing and verifying latest version...");
+        let latest = parse_latest(
+            contents
+                .get(LATEST_FILE)
+                .ok_or(anyhow!("File <latest.yml> not found in manifest."))?
+                .clone(),
+        )
+        .await?;
 
+        let workdir = download_verify_latest(latest, contents.clone()).await?;
+
+        println!("Downloaded setup executable!");
+        workdir
+    };
+
+    println!("Working in: {workdir:?}");
+    let found_path = extract_files(&workdir, args.clone())?;
+    println!("Internal archive: {found_path}");
 
     Ok(())
 }

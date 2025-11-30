@@ -33,6 +33,7 @@
             rustup
             pkg-config
             openssl
+            nodejs
           ]; 
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath packages;
