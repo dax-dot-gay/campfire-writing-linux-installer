@@ -3,7 +3,6 @@ use std::{collections::HashMap, path::PathBuf};
 use anyhow::anyhow;
 use chrono::Utc;
 use clap::{Parser, ValueEnum};
-use hex::ToHex;
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -220,6 +219,35 @@ pub fn extract_files(directory: &TempDir, args: Args) -> anyhow::Result<String> 
     }
 }
 
+pub fn extract_asar(directory: &TempDir, asar: String) -> anyhow::Result<PathBuf> {
+    let status = Command::new("npx").args(["--yes", "@electron/asar", "extract", asar.as_str(), directory.path().join("unpack").to_str().unwrap()]).status()?;
+    if status.success() {
+        Ok(directory.path().join("unpack").to_path_buf())
+    } else {
+        Err(anyhow!("Failed to extract asar with code: {status}"))
+    }
+}
+
+pub async fn patch_file(directory: &TempDir) -> anyhow::Result<()> {
+    let fcontent = fs::read_to_string(directory.path().join("unpack/main.js")).await?;
+    let patched = fcontent.replace("setupAutoUpdate(tabs);", "// PATCH: REMOVE <setupAutoUpdate(tabs);>");
+    fs::write(directory.path().join("unpack/main.js"), patched.into_bytes()).await?;
+
+    let pcontent = fs::read_to_string(directory.path().join("unpack/package.json")).await?;
+    let ppatched = pcontent.replace("\"@campfire-technology-llc/writing-software\": \"*\",", "");
+    fs::write(directory.path().join("unpack/package.json"), ppatched.into_bytes()).await?;
+    Ok(())
+}
+
+pub async fn build_and_distribute(directory: &TempDir) -> anyhow::Result<()> {
+    Command::new("npm").current_dir(directory.path().join("unpack")).args(["install", "--save-dev", "electron"]).status()?;
+    Command::new("npm").current_dir(directory.path().join("unpack")).args(["install", "--save", "uuid"]).status()?;
+    Command::new("npx").current_dir(directory.path().join("unpack")).args(["electron-builder", "-l", "tar.xz", "appimage"]).status()?;
+    copy_dir::copy_dir(directory.path().join("unpack/dist"), "output")?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -251,6 +279,12 @@ async fn main() -> anyhow::Result<()> {
     println!("Working in: {workdir:?}");
     let found_path = extract_files(&workdir, args.clone())?;
     println!("Internal archive: {found_path}");
+
+    let unpack_path = extract_asar(&workdir, found_path)?;
+    println!("Unpacked to: {:?}. Patching...", unpack_path.clone());
+
+    patch_file(&workdir).await?;
+    build_and_distribute(&workdir).await?;
 
     Ok(())
 }

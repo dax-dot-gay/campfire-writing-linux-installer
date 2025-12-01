@@ -5,3 +5,5 @@ flake.lock
 
 /target
 existing
+camp-li-*
+output
