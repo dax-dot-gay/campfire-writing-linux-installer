@@ -182,12 +182,14 @@ pub fn extract_files(directory: &TempDir, args: Args) -> anyhow::Result<String> 
             .build()
             .collect();
         if let Some(found) = results.pop() {
-            let status = Command::new("unar").args([
-                "-o",
-                directory.path().to_str().unwrap(),
-                "-d",
-                found.as_str(),
-            ]).status()?;
+            let status = Command::new("unar")
+                .args([
+                    "-o",
+                    directory.path().to_str().unwrap(),
+                    "-d",
+                    found.as_str(),
+                ])
+                .status()?;
             if status.success() {
                 let mut results: Vec<String> = rust_search::SearchBuilder::default()
                     .location(directory.path().join(args.architecture.dname()))
@@ -201,9 +203,7 @@ pub fn extract_files(directory: &TempDir, args: Args) -> anyhow::Result<String> 
                 if let Some(asar) = results.pop() {
                     Ok(asar)
                 } else {
-                    Err(anyhow!(
-                        "Failed to find ASAR!"
-                    ))
+                    Err(anyhow!("Failed to find ASAR!"))
                 }
             } else {
                 Err(anyhow!("Internal extraction failed with code: {status}"))
@@ -220,7 +220,15 @@ pub fn extract_files(directory: &TempDir, args: Args) -> anyhow::Result<String> 
 }
 
 pub fn extract_asar(directory: &TempDir, asar: String) -> anyhow::Result<PathBuf> {
-    let status = Command::new("npx").args(["--yes", "@electron/asar", "extract", asar.as_str(), directory.path().join("unpack").to_str().unwrap()]).status()?;
+    let status = Command::new("npx")
+        .args([
+            "--yes",
+            "@electron/asar",
+            "extract",
+            asar.as_str(),
+            directory.path().join("unpack").to_str().unwrap(),
+        ])
+        .status()?;
     if status.success() {
         Ok(directory.path().join("unpack").to_path_buf())
     } else {
@@ -230,19 +238,44 @@ pub fn extract_asar(directory: &TempDir, asar: String) -> anyhow::Result<PathBuf
 
 pub async fn patch_file(directory: &TempDir) -> anyhow::Result<()> {
     let fcontent = fs::read_to_string(directory.path().join("unpack/main.js")).await?;
-    let patched = fcontent.replace("setupAutoUpdate(tabs);", "// PATCH: REMOVE <setupAutoUpdate(tabs);>");
-    fs::write(directory.path().join("unpack/main.js"), patched.into_bytes()).await?;
+    let patched = fcontent
+        .replace(
+            "setupAutoUpdate(tabs);",
+            "// PATCH: REMOVE <setupAutoUpdate(tabs);>",
+        )
+        .replace(
+            "let confirmedLatestVersion = isDev;",
+            "let confirmedLatestVersion = true;",
+        );
+    fs::write(
+        directory.path().join("unpack/main.js"),
+        patched.into_bytes(),
+    )
+    .await?;
 
     let pcontent = fs::read_to_string(directory.path().join("unpack/package.json")).await?;
     let ppatched = pcontent.replace("\"@campfire-technology-llc/writing-software\": \"*\",", "");
-    fs::write(directory.path().join("unpack/package.json"), ppatched.into_bytes()).await?;
+    fs::write(
+        directory.path().join("unpack/package.json"),
+        ppatched.into_bytes(),
+    )
+    .await?;
     Ok(())
 }
 
 pub async fn build_and_distribute(directory: &TempDir) -> anyhow::Result<()> {
-    Command::new("npm").current_dir(directory.path().join("unpack")).args(["install", "--save-dev", "electron"]).status()?;
-    Command::new("npm").current_dir(directory.path().join("unpack")).args(["install", "--save", "uuid"]).status()?;
-    Command::new("npx").current_dir(directory.path().join("unpack")).args(["electron-builder", "-l", "tar.xz", "appimage"]).status()?;
+    Command::new("npm")
+        .current_dir(directory.path().join("unpack"))
+        .args(["install", "--save-dev", "electron"])
+        .status()?;
+    Command::new("npm")
+        .current_dir(directory.path().join("unpack"))
+        .args(["install", "--save", "uuid"])
+        .status()?;
+    Command::new("npx")
+        .current_dir(directory.path().join("unpack"))
+        .args(["electron-builder", "-l", "tar.xz", "appimage"])
+        .status()?;
     copy_dir::copy_dir(directory.path().join("unpack/dist"), "output")?;
 
     Ok(())
